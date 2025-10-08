@@ -1,0 +1,4 @@
+__pycache__/
+exports/
+*.session
+.env

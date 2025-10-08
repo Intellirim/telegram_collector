@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: telegram-collector
+    runtime: python
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn telegram_service:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.14
+      - key: API_ID
+        sync: false          # Render 대시보드에서 값 넣음
+      - key: API_HASH
+        sync: false          # Render 대시보드에서 값 넣음
+      - key: TELETHON_STRING_SESSION
+        sync: false          # 로컬에서 생성한 세션 문자열
+      - key: OUTPUT_DIR
+        value: /data/exports
+      - key: CHANNELS
+        value: WhaleFollower,cryptoquant_kr,cq_alert_kr,Gorae_Insight,coinnesskr,Gorae_gorae,emperorcoin,insidertracking,"wcforumxyz","Samsung_Global_SW","blockmedia"
+      - key: SESSION_NAME
+        value: session_main
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
+    healthCheckPath: /telegram/messages
+    autoDeploy: true
