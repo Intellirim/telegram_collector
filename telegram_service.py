@@ -12,6 +12,7 @@ from telethon.sessions import StringSession
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 SESSION_STR = os.getenv("TELETHON_STRING_SESSION")
+
 CHANNELS = os.getenv(
     "CHANNELS",
     "WhaleFollower,cryptoquant_kr,cq_alert_kr,Gorae_Insight,coinnesskr,Gorae_gorae,emperorcoin,insidertracking"
@@ -21,6 +22,12 @@ OUTPUT_DIR = os.getenv("OUTPUT_DIR", "exports")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 LATEST_PATH = os.path.join(OUTPUT_DIR, "latest.json")
 CP_PATH = os.path.join(OUTPUT_DIR, "checkpoints.json")   # 채널별 last_id 저장
+
+# ---- 자동 폴링 설정 (추가) ----
+ENABLE_AUTO_POLL = os.getenv("ENABLE_AUTO_POLL", "false").lower() == "true"
+POLL_INTERVAL_SEC = int(os.getenv("POLL_INTERVAL_SEC", "300"))  # 기본 5분
+AUTO_SINCE_HOURS = int(os.getenv("AUTO_SINCE_HOURS", "24"))
+PER_CHANNEL_LIMIT = int(os.getenv("PER_CHANNEL_LIMIT", "500"))
 
 client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
 app = FastAPI(title="Telegram Collector API")
@@ -118,6 +125,38 @@ async def collect_all(channels: List[str], since_hours: int = 24, per_channel_li
     print(f"[INFO] Saved {len(final)} -> {outfile}")
     return {"path": outfile, "count": len(final), "mode": mode}
 
+# ===== background poller (추가) =====
+_poller_task = None
+
+async def _poller_loop():
+    """주기적으로 수집을 실행하는 폴링 루프 (자동 폴링 켜진 경우에만)."""
+    print(f"[POLL] auto polling enabled: interval={POLL_INTERVAL_SEC}s, since_hours={AUTO_SINCE_HOURS}, per_channel_limit={PER_CHANNEL_LIMIT}")
+    while True:
+        try:
+            await collect_all(CHANNELS, since_hours=AUTO_SINCE_HOURS, per_channel_limit=PER_CHANNEL_LIMIT)
+        except Exception as e:
+            print(f"[POLL][ERR] collect_all failed: {e}")
+        await asyncio.sleep(POLL_INTERVAL_SEC)
+
+@app.on_event("startup")
+async def _on_startup():
+    global _poller_task
+    if ENABLE_AUTO_POLL:
+        # 백그라운드 태스크 시작
+        loop = asyncio.get_event_loop()
+        _poller_task = loop.create_task(_poller_loop())
+        print("[POLL] background poller started")
+    else:
+        print("[POLL] auto polling disabled")
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    global _poller_task
+    if _poller_task:
+        _poller_task.cancel()
+        _poller_task = None
+        print("[POLL] background poller stopped")
+
 # ===== API =====
 @app.get("/telegram/messages")
 async def get_messages(since_hours: int = Query(24, ge=1, le=168), refresh: bool = Query(False)):
@@ -150,6 +189,21 @@ def list_files():
 def get_checkpoints():
     return load_cp()
 
+# 편의용 헬스/설정 확인 (추가)
+@app.get("/health")
+def health():
+    return {"status": "ok", "auto_poll": ENABLE_AUTO_POLL}
+
+@app.get("/config")
+def config():
+    return {
+        "ENABLE_AUTO_POLL": ENABLE_AUTO_POLL,
+        "POLL_INTERVAL_SEC": POLL_INTERVAL_SEC,
+        "AUTO_SINCE_HOURS": AUTO_SINCE_HOURS,
+        "PER_CHANNEL_LIMIT": PER_CHANNEL_LIMIT,
+        "CHANNELS": CHANNELS,
+    }
+
 # ===== main =====
 if __name__ == "__main__":
     import uvicorn, argparse
@@ -158,12 +212,17 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "8000")))
     parser.add_argument("--collect-once", action="store_true")
     parser.add_argument("--since-hours", type=int, default=24)
+    parser.add_argument("--per-channel-limit", type=int, default=PER_CHANNEL_LIMIT)
     args = parser.parse_args()
 
     if args.collect_once and not args.serve:
-        asyncio.get_event_loop().run_until_complete(collect_all(CHANNELS, args.since_hours))
+        asyncio.get_event_loop().run_until_complete(
+            collect_all(CHANNELS, args.since_hours, per_channel_limit=args.per_channel_limit)
+        )
     elif args.serve and not args.collect_once:
         uvicorn.run("telegram_service:app", host="0.0.0.0", port=args.port)
     else:
-        asyncio.get_event_loop().run_until_complete(collect_all(CHANNELS, args.since_hours))
+        asyncio.get_event_loop().run_until_complete(
+            collect_all(CHANNELS, args.since_hours, per_channel_limit=args.per_channel_limit)
+        )
         uvicorn.run("telegram_service:app", host="0.0.0.0", port=args.port)
